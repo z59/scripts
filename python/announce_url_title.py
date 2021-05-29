@@ -83,7 +83,7 @@
 import weechat
 w = weechat
 import re
-import htmllib
+from HTMLParser import HTMLParser
 from time import time as now
 from fnmatch import fnmatch
 from urllib import quote
@@ -127,10 +127,8 @@ def say(s, buffer=''):
 
 def unescape(s):
     """Unescape HTML entities"""
-    p = htmllib.HTMLParser(None)
-    p.save_bgn()
-    p.feed(s)
-    return p.save_end()
+    p = HTMLParser()
+    return p.unescape(s)
 
 def url_print_cb(data, buffer, time, tags, displayed, highlight, prefix, message):
     global buffer_name, urls, ignore_buffers
@@ -199,29 +197,41 @@ def url_process_launcher():
         if not url_d: # empty dict means not launched
             url_d['launched'] = now()
 
-            # Read 8192
             python2_bin = w.info_get("python2_bin", "") or "python"
-            cmd = python2_bin + " -c \"import urllib2; opener = urllib2.build_opener();"
-            cmd += "opener.addheaders = [('User-agent','%s')];" % user_agent
-            cmd += "print opener.open('%s').read(8192)\"" % url
 
             url_d['stdout'] = ''
-            url_d['url_hook_process'] = w.hook_process(cmd, 30 * 1000, "url_process_cb", "")
+            url_d['url_hook_process'] = w.hook_process_hashtable(python2_bin,
+                                                                 {'arg1': '-c',
+                                                                  'arg2': '''
+import sys, urllib2
+res = urllib2.urlopen(
+    urllib2.Request(sys.argv[-1], headers={'User-agent': sys.argv[-2]})
+)
+inf = res.info()
+if inf.gettype() != 'text/html':
+    sys.exit(1)
+sys.stdout.write(
+    res.read(200000).decode(inf.getparam('charset') or 'utf-8', errors='replace').encode('utf-8')
+)
+''',
+                                                                  'arg3': '--', 'arg4': user_agent, 'arg5': url},
+                                                                 30 * 1000, 'url_process_cb', url)
 
     return w.WEECHAT_RC_OK
 
-def url_process_cb(data, command, rc, stdout, stderr):
+def url_process_cb(url, command, rc, stdout, stderr):
     """ Callback parsing html for title """
 
     global buffer_name, urls
 
-    url = command.split("'")[-2]
     if stdout != "":
         urls[url]['stdout'] += stdout
+    if stderr != '':
+        w.prnt('', '%s: url process: %s' % (SCRIPT_NAME, stderr))
     if int(rc) >= 0:
 
-        head = re.sub("[\r\n\t ]"," ", urls[url]['stdout'])
-        title = re.search('(?i)\<title\>(.*?)\</title\>', head)
+        head = re.sub("[\r\n\t ]"," ", urls[url]['stdout'].decode('utf-8'))
+        title = re.search('(?i)<title[^>]*>(.*?)</title>', head)
         if title:
             title = unescape(title.group(1))
 
@@ -238,16 +248,16 @@ def url_process_cb(data, command, rc, stdout, stderr):
                 found = False
                 for active_buffer in w.config_get_plugin('buffers').split(','):
                     if active_buffer.lower() == buffer_name.lower():
-                        w.command('', '/msg -server %s %s %s' %(server, buffer, output))
+                        w.command('', ('/msg -server %s %s %s' %(server, buffer, output)).encode('utf-8'))
                         found = True
                 for active_buffer in w.config_get_plugin('buffers_notice').split(','):
                     if active_buffer.lower() == buffer_name.lower():
-                        w.command('', '/notice -server %s %s %s' %(server, buffer, output))
+                        w.command('', ('/notice -server %s %s %s' %(server, buffer, output)).encode('utf-8'))
                         found = True
                 if found == False:
-                    say(output,w.buffer_search('', buffer_name))
+                    say(output.encode('utf-8'),w.buffer_search('', buffer_name))
             else:
-                say(output,w.buffer_search('', buffer_name))
+                say(output.encode('utf-8'),w.buffer_search('', buffer_name))
         urls[url]['stdout'] = ''
 
     return w.WEECHAT_RC_OK
